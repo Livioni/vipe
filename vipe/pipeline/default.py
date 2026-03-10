@@ -93,7 +93,13 @@ class DefaultAnnotationPipeline(Pipeline):
         ]
         if (depth_align_model := self.post_cfg.depth_align_model) is not None:
             if depth_align_model.startswith("mvd_"):
-                post_processors.append(MultiviewDepthProcessor(slam_output, model=depth_align_model))
+                post_processors.append(
+                    MultiviewDepthProcessor(
+                        slam_output,
+                        model=depth_align_model,
+                        known_depth_dir=self.post_cfg.get("known_depth_dir", None),
+                    )
+                )
             else:
                 post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model))
         return ProcessedVideoStream(video_stream, post_processors)

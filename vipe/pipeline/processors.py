@@ -15,6 +15,8 @@
 
 
 import logging
+import re
+from pathlib import Path
 from typing import Iterator
 
 import numpy as np
@@ -57,7 +59,7 @@ class IntrinsicEstimationProcessor(StreamProcessor):
         frame_height, frame_width = frame.size()
         fx = fy = frame_height / (2 * np.tan(self.fov_y / 2))
         frame.intrinsics = torch.as_tensor(
-            [fx, fy, frame_width / 2, frame_height / 2] + self.distortion,
+            [200, 200, frame_width / 2, frame_height / 2] + self.distortion,
         ).float()
         frame.camera_type = self.camera_type
         return frame
@@ -320,6 +322,7 @@ class MultiviewDepthProcessor(StreamProcessor):
         window_size: int = 10,                  # Practically this should be as large as possible if memory permits.
         overlap_size: int = 3,
         secondary_keyframe: bool = False,       # This is found to cause jittering for some scenes due to abrupt context changes.
+        known_depth_dir: str | None = None,
     ):
         super().__init__()
         self.slam_output = slam_output
@@ -327,13 +330,24 @@ class MultiviewDepthProcessor(StreamProcessor):
         self.window_size = window_size
         self.overlap_size = overlap_size
         self.secondary_keyframe = secondary_keyframe
+        self.known_depth_dir = Path(known_depth_dir) if known_depth_dir else None
 
         self.keyframes_inds = unpack_optional(self.slam_output.slam_map).dense_disp_frame_inds
         self.keyframes_data: list[VideoFrame] = []
         self.n_frames = 0
+        self.known_depth_paths: dict[int, Path] = {}
 
         # Need two passes for this iterator to work.
         self.n_passes_required = 2
+
+        if self.known_depth_dir is not None:
+            self.known_depth_paths = self._build_known_depth_index(self.known_depth_dir)
+            logger.info(
+                "Using known depth maps from %s (%d frames indexed).",
+                self.known_depth_dir,
+                len(self.known_depth_paths),
+            )
+            return
 
         if self.model == "mvd_dav3":
             try:
@@ -347,12 +361,71 @@ class MultiviewDepthProcessor(StreamProcessor):
             dav3_logger.level = 0  # Disable logging timing information
             self.dav3_api = DepthAnything3.from_pretrained("depth-anything/DA3-GIANT")
             self.dav3_api = self.dav3_api.cuda().eval()
+        else:
+            raise ValueError(f"Unsupported multi-view depth model: {self.model}")
 
     def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
         return previous_attributes | {FrameAttribute.METRIC_DEPTH}
 
     def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
         raise NotImplementedError("MultiviewDepthProcessor should not be called directly.")
+
+    def _build_known_depth_index(self, depth_dir: Path) -> dict[int, Path]:
+        if not depth_dir.exists():
+            raise FileNotFoundError(f"Known depth directory does not exist: {depth_dir}")
+        if not depth_dir.is_dir():
+            raise NotADirectoryError(f"Known depth path is not a directory: {depth_dir}")
+
+        index: dict[int, Path] = {}
+        for suffix in ("*.npy", "*.npz"):
+            for depth_path in sorted(depth_dir.glob(suffix)):
+                frame_idx = self._parse_frame_index(depth_path.stem)
+                if frame_idx is None:
+                    continue
+                index[frame_idx] = depth_path
+
+        if len(index) == 0:
+            raise ValueError(
+                f"No supported depth files found in {depth_dir}. Expected *.npy or *.npz with numeric frame names."
+            )
+        return index
+
+    def _parse_frame_index(self, stem: str) -> int | None:
+        match = re.search(r"\d+", stem)
+        if match is None:
+            return None
+        return int(match.group(0))
+
+    def _load_known_depth(self, frame_idx: int, frame_size: tuple[int, int]) -> torch.Tensor:
+        depth_path = self.known_depth_paths.get(frame_idx)
+        if depth_path is None:
+            raise KeyError(f"Missing depth file for frame {frame_idx} in {self.known_depth_dir}")
+
+        if depth_path.suffix == ".npy":
+            depth_np = np.load(depth_path)
+        elif depth_path.suffix == ".npz":
+            npz_data = np.load(depth_path)
+            if len(npz_data.files) == 0:
+                raise ValueError(f"Empty npz depth file: {depth_path}")
+            depth_np = npz_data[npz_data.files[0]]
+        else:
+            raise ValueError(f"Unsupported known depth format: {depth_path.suffix}")
+
+        depth = torch.from_numpy(np.asarray(depth_np)).float()
+        if depth.ndim == 3:
+            if depth.shape[0] == 1:
+                depth = depth[0]
+            elif depth.shape[-1] == 1:
+                depth = depth[..., 0]
+            else:
+                raise ValueError(f"Depth should be single-channel, but got shape {tuple(depth.shape)} at {depth_path}")
+        if depth.ndim != 2:
+            raise ValueError(f"Depth should be 2D after squeeze, but got shape {tuple(depth.shape)} at {depth_path}")
+
+        if tuple(depth.shape) != frame_size:
+            depth = torch.nn.functional.interpolate(depth[None, None], frame_size, mode="bilinear")[0, 0]
+        depth = torch.where(depth > 0, depth, torch.nan)
+        return depth
 
     def _probe_keyframe_indices(self, frame_idx: int) -> list[int]:
         inds: list[int] = []
@@ -377,6 +450,13 @@ class MultiviewDepthProcessor(StreamProcessor):
             yield frame
 
     def estimate_depth_sliding_window(self, previous_iterator: Iterator[VideoFrame]) -> Iterator[VideoFrame]:
+        if self.known_depth_dir is not None:
+            for frame_idx, frame in pbar(enumerate(previous_iterator), desc="Loading known depth"):
+                frame.metric_depth = self._load_known_depth(frame_idx, frame.size()).to(frame.device)
+                frame.information = "KnownDepth"
+                yield frame
+            return
+
         current_sliding_window: list[VideoFrame] = []
         current_sliding_window_idx: list[int] = []
         trailing_depth: torch.Tensor | None = None

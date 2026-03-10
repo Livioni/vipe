@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import logging
-import tempfile
 import zipfile
 
 from dataclasses import dataclass
@@ -23,9 +23,7 @@ from typing import Iterator
 
 import cv2
 import imageio
-import Imath
 import numpy as np
-import OpenEXR
 import torch
 
 from vipe.ext.lietorch import SE3
@@ -53,7 +51,7 @@ class ArtifactPath:
 
     @property
     def depth_path(self) -> Path:
-        return self.base_path / "depth" / f"{self.artifact_name}.zip"
+        return self.base_path / "depth" / self.artifact_name
 
     @property
     def intrinsics_path(self) -> Path:
@@ -134,7 +132,7 @@ class ArtifactPath:
 
     @property
     def eval_gt_depth_path(self) -> Path:
-        return self.base_path / "eval" / f"{self.artifact_name}_depth_gt.zip"
+        return self.base_path / "eval" / f"{self.artifact_name}_depth_gt"
 
     @property
     def aux_vis_plot_path(self) -> Path:
@@ -252,7 +250,7 @@ def read_rgb_artifacts(rgb_file_path: Path) -> Iterator[tuple[int, torch.Tensor]
 
 
 def save_depth_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStream, gt: bool = False) -> None:
-    # Save metric depth as zipped exr files.
+    # Save metric depth as per-frame .npy files.
     if gt:
         metric_depth_list = cached_final_stream.get_gt_stream_attribute(FrameAttribute.METRIC_DEPTH)
         path = out_path.eval_gt_depth_path
@@ -266,50 +264,73 @@ def save_depth_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStrea
         if depth_data is not None
     ]
     if len(metric_depth_list) > 0:
-        path.parent.mkdir(exist_ok=True, parents=True)
-        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-            for frame_idx, metric_depth in metric_depth_list:
-                height, width = metric_depth.shape
-                header = OpenEXR.Header(width, height)
-                header["channels"] = {"Z": Imath.Channel(Imath.PixelType(Imath.PixelType.HALF))}
-                with tempfile.NamedTemporaryFile(suffix=".exr") as f:
-                    exr = OpenEXR.OutputFile(f.name, header)
-                    exr.writePixels({"Z": metric_depth.astype(np.float16).tobytes()})
-                    exr.close()
-                    z.write(f.name, f"{frame_idx:05d}.exr")
+        path.mkdir(exist_ok=True, parents=True)
+        for frame_idx, metric_depth in metric_depth_list:
+            np.save(path / f"{frame_idx:05d}.npy", metric_depth.astype(np.float32))
 
 
-def read_depth_artifacts(zip_file_path: Path) -> Iterator[tuple[int, torch.Tensor]]:
+def read_depth_artifacts(depth_path: Path) -> Iterator[tuple[int, torch.Tensor]]:
     """
-    Read metric depth from zipped exr files.
+    Read metric depth from per-frame .npy files.
+    Backward compatibility:
+    - directory of .npy files (new format)
+    - .zip with .npy members
+    - .zip with legacy .exr members
     """
-    valid_width, valid_height = 0, 0
-    with zipfile.ZipFile(zip_file_path, "r") as z:
-        for file_name in sorted(z.namelist()):
-            frame_idx = int(file_name.split(".")[0])
-            with z.open(file_name) as f:
-                try:
-                    exr = OpenEXR.InputFile(f)
-                except OSError:
-                    # Sometimes EXR loader might fail, we return all nan maps.
-                    logger.warning(f"Failed to load EXR file {zip_file_path}-{file_name}. Returning all nan maps.")
-                    assert valid_width > 0 and valid_height > 0
-                    yield (
-                        frame_idx,
-                        torch.full(
-                            (valid_height, valid_width),
-                            float("nan"),
-                            dtype=torch.float32,
-                        ),
-                    )
-                    continue
-                header = exr.header()
-                dw = header["dataWindow"]
-                valid_width = width = dw.max.x - dw.min.x + 1
-                valid_height = height = dw.max.y - dw.min.y + 1
-                channels = exr.channels(["Z"])
-                depth_data = np.frombuffer(channels[0], dtype=np.float16).reshape((height, width))
-                yield frame_idx, torch.from_numpy(depth_data.copy()).float()
+    if depth_path.is_dir():
+        for file_path in sorted(depth_path.glob("*.npy")):
+            frame_idx = int(file_path.stem)
+            depth_data = np.load(file_path).astype(np.float32)
+            yield frame_idx, torch.from_numpy(depth_data)
+        return
+
+    if depth_path.suffix == ".zip":
+        with zipfile.ZipFile(depth_path, "r") as z:
+            names = sorted(z.namelist())
+            # New zipped-npy format
+            if any(name.endswith(".npy") for name in names):
+                for file_name in names:
+                    if not file_name.endswith(".npy"):
+                        continue
+                    frame_idx = int(Path(file_name).stem)
+                    with z.open(file_name) as f:
+                        depth_data = np.load(io.BytesIO(f.read())).astype(np.float32)
+                    yield frame_idx, torch.from_numpy(depth_data)
+                return
+
+            # Legacy EXR zip format
+            try:
+                import Imath
+                import OpenEXR
+            except ModuleNotFoundError as exc:
+                raise ModuleNotFoundError(
+                    "Reading legacy depth zip (.exr) requires OpenEXR and Imath."
+                ) from exc
+
+            valid_width, valid_height = 0, 0
+            for file_name in names:
+                frame_idx = int(file_name.split(".")[0])
+                with z.open(file_name) as f:
+                    try:
+                        exr = OpenEXR.InputFile(f)
+                    except OSError:
+                        logger.warning(f"Failed to load EXR file {depth_path}-{file_name}. Returning all nan maps.")
+                        assert valid_width > 0 and valid_height > 0
+                        yield (
+                            frame_idx,
+                            torch.full((valid_height, valid_width), float("nan"), dtype=torch.float32),
+                        )
+                        continue
+                    header = exr.header()
+                    dw = header["dataWindow"]
+                    valid_width = width = dw.max.x - dw.min.x + 1
+                    valid_height = height = dw.max.y - dw.min.y + 1
+                    channels = exr.channels(["Z"])
+                    depth_data = np.frombuffer(channels[0], dtype=np.float16).reshape((height, width))
+                    yield frame_idx, torch.from_numpy(depth_data.copy()).float()
+        return
+
+    raise ValueError(f"Unsupported depth artifact path: {depth_path}")
 
 
 def read_instance_artifacts(
@@ -353,7 +374,7 @@ def save_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStream) -> 
     # Save original RGB as H264-encoded video.
     save_rgb_artifacts(out_path, cached_final_stream)
 
-    # Save metric depth as zipped exr files.
+    # Save metric depth as per-frame .npy files.
     save_depth_artifacts(out_path, cached_final_stream)
 
     # Save Instance mask as zipped PNG files.
