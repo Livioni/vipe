@@ -40,6 +40,7 @@ from . import AnnotationPipelineOutput, Pipeline
 from .processors import (
     AdaptiveDepthProcessor,
     GeoCalibIntrinsicsProcessor,
+    KnownDepthProcessor,
     MultiviewDepthProcessor,
     TrackAnythingProcessor,
 )
@@ -58,6 +59,13 @@ class DefaultAnnotationPipeline(Pipeline):
         self.out_path = Path(self.out_cfg.path)
         self.out_path.mkdir(exist_ok=True, parents=True)
         self.camera_type = CameraType(self.init_cfg.camera_type)
+        if self.init_cfg.get("known_depth_dir", None) is not None:
+            if self.slam_cfg.get("keyframe_depth", None) is not None:
+                logger.info("Found init.known_depth_dir; disabling slam.keyframe_depth model and using known depth for SLAM.")
+                self.slam_cfg.keyframe_depth = None
+            if bool(self.slam_cfg.get("optimize_intrinsics", False)):
+                logger.info("Found init.known_depth_dir; disabling slam.optimize_intrinsics for metric depth constraints.")
+                self.slam_cfg.optimize_intrinsics = False
 
     def _add_init_processors(self, video_stream: VideoStream) -> ProcessedVideoStream:
         init_processors: list[StreamProcessor] = []
@@ -78,6 +86,8 @@ class DefaultAnnotationPipeline(Pipeline):
                     sam_run_gap=int(video_stream.fps() * self.init_cfg.instance.kf_gap_sec),
                 )
             )
+        if (known_depth_dir := self.init_cfg.get("known_depth_dir", None)) is not None:
+            init_processors.append(KnownDepthProcessor(known_depth_dir))
         return ProcessedVideoStream(video_stream, init_processors)
 
     def _add_post_processors(
@@ -98,6 +108,7 @@ class DefaultAnnotationPipeline(Pipeline):
                         slam_output,
                         model=depth_align_model,
                         known_depth_dir=self.post_cfg.get("known_depth_dir", None),
+                        align_to_slam=bool(self.post_cfg.get("align_to_slam", False)),
                     )
                 )
             else:

@@ -2,9 +2,9 @@ import hydra
 from omegaconf import DictConfig
 
 '''
-vipe infer ropedia/ep1/stereo_left.mp4 \
-  --output vipe_results/ep1 \
-  --known-depth-dir ropedia/ep1/depths
+vipe infer datasets/ropedia/ep1/stereo_left.mp4 \
+  --output vipe_results/ropedia/ep1_gt \
+  --known-depth-dir datasets/ropedia/ep1/depths
 '''
 
 @hydra.main(version_base=None, config_path="configs", config_name="default")

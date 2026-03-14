@@ -129,7 +129,7 @@ class ClientClosures:
                     self.gui_id.value = (self.gui_id.value + 1) % len(all_artifacts)
 
             self.gui_name = self.client.gui.add_text("Artifact Name", "")
-            self.gui_t_sub = self.client.gui.add_slider("Temporal subsample", min=1, max=16, step=1, initial_value=1)
+            self.gui_t_sub = self.client.gui.add_slider("Temporal subsample", min=1, max=16, step=1, initial_value=8)
             self.gui_s_sub = self.client.gui.add_slider("Spatial subsample", min=1, max=8, step=1, initial_value=2)
             self.gui_id.on_update(self.on_sample_update)
             self.gui_t_sub.on_update(self.on_sample_update)

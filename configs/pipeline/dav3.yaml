@@ -7,3 +7,4 @@ slam:
 post:
   depth_align_model: "mvd_dav3"
   known_depth_dir: null
+  align_to_slam: false

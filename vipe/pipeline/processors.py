@@ -23,7 +23,7 @@ import numpy as np
 import torch
 
 from vipe.priors.depth import DepthEstimationInput, make_depth_model
-from vipe.priors.depth.alignment import align_inv_depth_to_depth
+from vipe.priors.depth.alignment import align_depth_to_depth, align_inv_depth_to_depth
 from vipe.priors.depth.priorda import PriorDAModel
 from vipe.priors.depth.videodepthanything import VideoDepthAnythingDepthModel
 from vipe.priors.geocalib import GeoCalib
@@ -141,6 +141,91 @@ class TrackAnythingProcessor(StreamProcessor):
 
         frame.mask = erode(frame_instance_mask, self.mask_expand)
         return frame
+
+
+class KnownDepthProcessor(StreamProcessor):
+    """Load per-frame known depth from a directory and attach to frames."""
+
+    def __init__(self, known_depth_dir: str | Path):
+        self.known_depth_dir = Path(known_depth_dir)
+        self.known_depth_paths = self._build_known_depth_index(self.known_depth_dir)
+        logger.info(
+            "Using known depth maps for SLAM from %s (%d frames indexed).",
+            self.known_depth_dir,
+            len(self.known_depth_paths),
+        )
+
+    def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
+        return previous_attributes | {FrameAttribute.METRIC_DEPTH}
+
+    def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
+        # Prefer raw frame index since file names usually follow the source frame id.
+        depth_frame_idx = frame.raw_frame_idx
+        if depth_frame_idx not in self.known_depth_paths:
+            depth_frame_idx = frame_idx
+        frame.metric_depth = self._load_known_depth(depth_frame_idx, frame.size()).to(frame.device)
+        frame.information = "KnownDepth(SLAM)"
+        return frame
+
+    def _build_known_depth_index(self, depth_dir: Path) -> dict[int, Path]:
+        if not depth_dir.exists():
+            raise FileNotFoundError(f"Known depth directory does not exist: {depth_dir}")
+        if not depth_dir.is_dir():
+            raise NotADirectoryError(f"Known depth path is not a directory: {depth_dir}")
+
+        index: dict[int, Path] = {}
+        for suffix in ("*.npy", "*.npz"):
+            for depth_path in sorted(depth_dir.glob(suffix)):
+                frame_idx = self._parse_frame_index(depth_path.stem)
+                if frame_idx is None:
+                    continue
+                index[frame_idx] = depth_path
+
+        if len(index) == 0:
+            raise ValueError(
+                f"No supported depth files found in {depth_dir}. Expected *.npy or *.npz with numeric frame names."
+            )
+        # Some datasets are 1-based (1, 2, 3, ...). Normalize to 0-based keys for internal use.
+        if 0 not in index and min(index) == 1:
+            index = {frame_idx - 1: depth_path for frame_idx, depth_path in index.items()}
+        return index
+
+    def _parse_frame_index(self, stem: str) -> int | None:
+        match = re.search(r"\d+", stem)
+        if match is None:
+            return None
+        return int(match.group(0))
+
+    def _load_known_depth(self, frame_idx: int, frame_size: tuple[int, int]) -> torch.Tensor:
+        depth_path = self.known_depth_paths.get(frame_idx)
+        if depth_path is None:
+            raise KeyError(f"Missing depth file for frame {frame_idx} in {self.known_depth_dir}")
+
+        if depth_path.suffix == ".npy":
+            depth_np = np.load(depth_path)
+        elif depth_path.suffix == ".npz":
+            npz_data = np.load(depth_path)
+            if len(npz_data.files) == 0:
+                raise ValueError(f"Empty npz depth file: {depth_path}")
+            depth_np = npz_data[npz_data.files[0]]
+        else:
+            raise ValueError(f"Unsupported known depth format: {depth_path.suffix}")
+
+        depth = torch.from_numpy(np.asarray(depth_np)).float()
+        if depth.ndim == 3:
+            if depth.shape[0] == 1:
+                depth = depth[0]
+            elif depth.shape[-1] == 1:
+                depth = depth[..., 0]
+            else:
+                raise ValueError(f"Depth should be single-channel, but got shape {tuple(depth.shape)} at {depth_path}")
+        if depth.ndim != 2:
+            raise ValueError(f"Depth should be 2D after squeeze, but got shape {tuple(depth.shape)} at {depth_path}")
+
+        if tuple(depth.shape) != frame_size:
+            depth = torch.nn.functional.interpolate(depth[None, None], frame_size, mode="bilinear")[0, 0]
+        depth = torch.where(depth > 0, depth, torch.nan)
+        return depth
 
 
 class AdaptiveDepthProcessor(StreamProcessor):
@@ -323,6 +408,7 @@ class MultiviewDepthProcessor(StreamProcessor):
         overlap_size: int = 3,
         secondary_keyframe: bool = False,       # This is found to cause jittering for some scenes due to abrupt context changes.
         known_depth_dir: str | None = None,
+        align_to_slam: bool = False,
     ):
         super().__init__()
         self.slam_output = slam_output
@@ -331,6 +417,8 @@ class MultiviewDepthProcessor(StreamProcessor):
         self.overlap_size = overlap_size
         self.secondary_keyframe = secondary_keyframe
         self.known_depth_dir = Path(known_depth_dir) if known_depth_dir else None
+        self.align_to_slam = align_to_slam
+        self.infill_target_pose = self.slam_output.get_view_trajectory(0)
 
         self.keyframes_inds = unpack_optional(self.slam_output.slam_map).dense_disp_frame_inds
         self.keyframes_data: list[VideoFrame] = []
@@ -453,7 +541,11 @@ class MultiviewDepthProcessor(StreamProcessor):
         if self.known_depth_dir is not None:
             for frame_idx, frame in pbar(enumerate(previous_iterator), desc="Loading known depth"):
                 frame.metric_depth = self._load_known_depth(frame_idx, frame.size()).to(frame.device)
-                frame.information = "KnownDepth"
+                if self.align_to_slam:
+                    frame.metric_depth = self._align_depth_with_slam(frame_idx, frame, frame.metric_depth)
+                    frame.information = "KnownDepth+SLAMAlign"
+                else:
+                    frame.information = "KnownDepth"
                 yield frame
             return
 
@@ -504,6 +596,11 @@ class MultiviewDepthProcessor(StreamProcessor):
 
                 for sw_idx, frame in enumerate(current_sliding_window[:n_frames_to_yield]):
                     frame.metric_depth = sw_depth[sw_idx]
+                    if self.align_to_slam:
+                        frame.metric_depth = self._align_depth_with_slam(
+                            current_sliding_window_idx[sw_idx], frame, frame.metric_depth
+                        )
+                        frame.information = "MVD+SLAMAlign"
                     yield frame
 
                 trailing_depth = sw_depth[n_frames_to_yield:]
@@ -519,3 +616,31 @@ class MultiviewDepthProcessor(StreamProcessor):
             yield from self.estimate_depth_sliding_window(previous_iterator)
         else:
             raise ValueError(f"Invalid pass index: {pass_idx}")
+
+    def _align_depth_with_slam(self, frame_idx: int, frame: VideoFrame, source_depth: torch.Tensor) -> torch.Tensor:
+        if self.slam_output.slam_map is None:
+            return source_depth
+        if frame.intrinsics is None or frame.camera_type is None:
+            return source_depth
+
+        slam_depth = self.slam_output.slam_map.project_map(
+            frame_idx,
+            0,
+            frame.size(),
+            unpack_optional(frame.intrinsics),
+            self.infill_target_pose[frame_idx],
+            unpack_optional(frame.camera_type),
+            infill=False,
+        )
+        valid_mask = slam_depth > 0
+        if frame.mask is not None:
+            valid_mask = valid_mask & frame.mask
+        if frame.sky_mask is not None:
+            valid_mask = valid_mask & (~frame.sky_mask)
+        if valid_mask.sum().item() < 64:
+            return source_depth
+
+        try:
+            return align_depth_to_depth(source_depth, slam_depth, valid_mask, quantile_masking=True, bias=True)
+        except RuntimeError:
+            return source_depth

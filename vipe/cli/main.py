@@ -45,7 +45,7 @@ from vipe.utils.viser import run_viser
 @click.option(
     "--known-depth-dir",
     type=click.Path(exists=True, path_type=Path),
-    help="Directory containing per-frame known depth files (*.npy or *.npz) for mvd post depth.",
+    help="Directory containing per-frame known depth files (*.npy or *.npz) for both SLAM init and mvd post depth.",
 )
 def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: bool, known_depth_dir: Path | None):
     """Run inference on a video file or directory of images."""
@@ -68,6 +68,7 @@ def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: 
     else:
         overrides.append("pipeline.output.save_viz=false")
     if known_depth_dir is not None:
+        overrides.append(f"pipeline.init.known_depth_dir={known_depth_dir}")
         overrides.append(f"pipeline.post.known_depth_dir={known_depth_dir}")
 
     # Set up stream configuration based on input type

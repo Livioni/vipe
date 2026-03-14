@@ -11,6 +11,25 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug VIPE Infer",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "vipe.cli.main",
+            "args": [
+                "infer",
+                "--image-dir",
+                "datasets/ropedia_vipe/ep3/images/left",
+                "--pipeline", "dav3_slam_only",
+                "--output",
+                "vipe_results/ropedia/ep3",
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
         }
     ]
 }
