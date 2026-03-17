@@ -269,6 +269,33 @@ def save_depth_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStrea
             np.save(path / f"{frame_idx:05d}.npy", metric_depth.astype(np.float32))
 
 
+def save_instance_mask_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStream) -> None:
+    instance_list = [
+        (frame_idx, frame_data.instance)
+        for frame_idx, frame_data in enumerate(cached_final_stream)
+        if frame_data.instance is not None
+    ]
+    if len(instance_list) > 0:
+        out_path.mask_path.parent.mkdir(exist_ok=True, parents=True)
+        with zipfile.ZipFile(out_path.mask_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for frame_idx, instance in instance_list:
+                _, mask_buffer = cv2.imencode(".png", instance.cpu().numpy().astype(np.uint8))
+                z.writestr(f"{frame_idx:05d}.png", mask_buffer.tobytes())
+
+
+def save_instance_phrases_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStream) -> None:
+    instance_phrases_combined = {}
+    for frame_data in cached_final_stream:
+        assert isinstance(frame_data, VideoFrame)
+        if frame_data.instance_phrases is not None:
+            instance_phrases_combined.update(frame_data.instance_phrases)
+    if len(instance_phrases_combined) > 0:
+        out_path.mask_phrase_path.parent.mkdir(exist_ok=True, parents=True)
+        with out_path.mask_phrase_path.open("w") as f:
+            for idx, phrase in instance_phrases_combined.items():
+                f.write(f"{idx}: {phrase}\n")
+
+
 def read_depth_artifacts(depth_path: Path) -> Iterator[tuple[int, torch.Tensor]]:
     """
     Read metric depth from per-frame .npy files.
@@ -360,44 +387,35 @@ def read_instance_phrases(instance_phrase_path: Path) -> dict[int, str]:
     return instance_phrases
 
 
-def save_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStream) -> None:
+def save_artifacts(
+    out_path: ArtifactPath,
+    cached_final_stream: VideoStream,
+    *,
+    save_pose: bool = True,
+    save_intrinsics: bool = True,
+    save_rgb: bool = True,
+    save_depth: bool = True,
+    save_mask: bool = True,
+    save_instance_phrases: bool = True,
+) -> None:
     """
-    Save each attribute independently.
+    Save each attribute independently based on the provided flags.
     """
 
-    # Save OpenCV cam2world matrices as 4x4 matrix in npz file
-    save_pose_artifacts(out_path, cached_final_stream)
+    if save_pose:
+        save_pose_artifacts(out_path, cached_final_stream)
 
-    # Save intrinsics as [fx, fy, cx, cy] in npz file
-    save_intrinsics_artifacts(out_path, cached_final_stream)
+    if save_intrinsics:
+        save_intrinsics_artifacts(out_path, cached_final_stream)
 
-    # Save original RGB as H264-encoded video.
-    save_rgb_artifacts(out_path, cached_final_stream)
+    if save_rgb:
+        save_rgb_artifacts(out_path, cached_final_stream)
 
-    # Save metric depth as per-frame .npy files.
-    save_depth_artifacts(out_path, cached_final_stream)
+    if save_depth:
+        save_depth_artifacts(out_path, cached_final_stream)
 
-    # Save Instance mask as zipped PNG files.
-    instance_list = [
-        (frame_idx, frame_data.instance)
-        for frame_idx, frame_data in enumerate(cached_final_stream)
-        if frame_data.instance is not None
-    ]
-    if len(instance_list) > 0:
-        out_path.mask_path.parent.mkdir(exist_ok=True, parents=True)
-        with zipfile.ZipFile(out_path.mask_path, "w", zipfile.ZIP_DEFLATED) as z:
-            for frame_idx, instance in instance_list:
-                _, mask_buffer = cv2.imencode(".png", instance.cpu().numpy().astype(np.uint8))
-                z.writestr(f"{frame_idx:05d}.png", mask_buffer.tobytes())
+    if save_mask:
+        save_instance_mask_artifacts(out_path, cached_final_stream)
 
-    # Save Instance phrases as txt file.
-    instance_phrases_combined = {}
-    for frame_data in cached_final_stream:
-        assert isinstance(frame_data, VideoFrame)
-        if frame_data.instance_phrases is not None:
-            instance_phrases_combined.update(frame_data.instance_phrases)
-    if len(instance_phrases_combined) > 0:
-        out_path.mask_phrase_path.parent.mkdir(exist_ok=True, parents=True)
-        with out_path.mask_phrase_path.open("w") as f:
-            for idx, phrase in instance_phrases_combined.items():
-                f.write(f"{idx}: {phrase}\n")
+    if save_instance_phrases:
+        save_instance_phrases_artifacts(out_path, cached_final_stream)

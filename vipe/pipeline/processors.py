@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 class IntrinsicEstimationProcessor(StreamProcessor):
     """Override existing intrinsics with estimated intrinsics."""
 
-    def __init__(self, video_stream: VideoStream, gap_sec: float = 1.0) -> None:
+    def __init__(self, video_stream: VideoStream, gap_sec: float = 1.0, image_dir: Path | None = None) -> None:
         super().__init__()
         gap_frame = int(gap_sec * video_stream.fps())
         gap_frame = min(gap_frame, (len(video_stream) - 1) // 2)
@@ -50,11 +50,56 @@ class IntrinsicEstimationProcessor(StreamProcessor):
         self.fov_y = -1.0
         self.camera_type = CameraType.PINHOLE
         self.distortion: list[float] = []
+        self.image_dir = image_dir
+        self.droid_intrinsics: torch.Tensor | None = None
+        
+        # 检测是否为DROID数据集并尝试加载intrinsics
+        if self.image_dir is not None and "droid" in str(self.image_dir).lower():
+            self._load_droid_intrinsics()
+
+    def _load_droid_intrinsics(self) -> None:
+        """从DROID数据集中加载intrinsics"""
+        if self.image_dir is None:
+            return
+            
+        # 从image_dir路径推断intrinsics文件路径
+        # 例如: datasets/droid/Fri_Apr_21_17:11:41_2023/17368348/images/left
+        # -> datasets/droid/Fri_Apr_21_17:11:41_2023/17368348/intrinsics/17368348_left.npy
+        image_dir_path = Path(self.image_dir)
+        
+        # 提取序列ID和视角(left/right)
+        view_name = image_dir_path.name  # "left" or "right"
+        sequence_id = image_dir_path.parent.parent.name  # "17368348"
+        
+        # 构建intrinsics文件路径
+        intrinsics_dir = image_dir_path.parent.parent / "intrinsics"
+        intrinsics_file = intrinsics_dir / f"{sequence_id}_{view_name}.npy"
+        
+        if intrinsics_file.exists():
+            try:
+                # 加载3x3的相机内参矩阵
+                K = np.load(intrinsics_file)
+                # 提取 fx, fy, cx, cy
+                fx, fy = K[0, 0], K[1, 1]
+                cx, cy = K[0, 2], K[1, 2]
+                self.droid_intrinsics = torch.as_tensor([fx, fy, cx, cy]).float()
+                logger.info(f"Loaded DROID intrinsics from {intrinsics_file}: fx={fx:.2f}, fy={fy:.2f}, cx={cx:.2f}, cy={cy:.2f}")
+            except Exception as e:
+                logger.warning(f"Failed to load DROID intrinsics from {intrinsics_file}: {e}")
+        else:
+            logger.warning(f"DROID intrinsics file not found: {intrinsics_file}")
 
     def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
         return previous_attributes | {FrameAttribute.INTRINSICS}
 
     def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
+        # 如果已经加载了DROID intrinsics，直接使用
+        if self.droid_intrinsics is not None:
+            frame.intrinsics = self.droid_intrinsics
+            frame.camera_type = self.camera_type
+            return frame
+        
+        # 否则使用默认的估计方式
         assert self.fov_y > 0, "FOV not set"
         frame_height, frame_width = frame.size()
         fx = fy = frame_height / (2 * np.tan(self.fov_y / 2))
@@ -71,8 +116,13 @@ class GeoCalibIntrinsicsProcessor(IntrinsicEstimationProcessor):
         video_stream: VideoStream,
         gap_sec: float = 1.0,
         camera_type: CameraType = CameraType.PINHOLE,
+        image_dir: Path | None = None,
     ) -> None:
-        super().__init__(video_stream, gap_sec)
+        super().__init__(video_stream, gap_sec, image_dir)
+
+        # 如果已经加载了DROID intrinsics，跳过GeoCalib估计
+        if self.droid_intrinsics is not None:
+            return
 
         is_pinhole = camera_type == CameraType.PINHOLE
         weights = "pinhole" if is_pinhole else "distorted"

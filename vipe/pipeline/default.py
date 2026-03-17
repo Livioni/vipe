@@ -59,6 +59,14 @@ class DefaultAnnotationPipeline(Pipeline):
         self.out_path = Path(self.out_cfg.path)
         self.out_path.mkdir(exist_ok=True, parents=True)
         self.camera_type = CameraType(self.init_cfg.camera_type)
+        self.save_artifacts_flag = bool(self.out_cfg.get("save_artifacts", False))
+        self.save_pose = bool(self.out_cfg.get("save_pose", True))
+        self.save_mask = bool(self.out_cfg.get("save_mask", True))
+        self.save_instance_phrases = bool(self.out_cfg.get("save_instance_phrases", True))
+        self.save_intrinsics = bool(self.out_cfg.get("save_intrinsics", False)) or self.save_artifacts_flag
+        self.save_rgb = bool(self.out_cfg.get("save_rgb", False)) or self.save_artifacts_flag
+        self.save_depth = bool(self.out_cfg.get("save_depth", False)) or self.save_artifacts_flag
+        self.save_meta_info = bool(self.out_cfg.get("save_meta_info", True))
         if self.init_cfg.get("known_depth_dir", None) is not None:
             if self.slam_cfg.get("keyframe_depth", None) is not None:
                 logger.info("Found init.known_depth_dir; disabling slam.keyframe_depth model and using known depth for SLAM.")
@@ -77,7 +85,12 @@ class DefaultAnnotationPipeline(Pipeline):
         assert FrameAttribute.METRIC_DEPTH not in video_stream.attributes()
         assert FrameAttribute.INSTANCE not in video_stream.attributes()
 
-        init_processors.append(GeoCalibIntrinsicsProcessor(video_stream, camera_type=self.camera_type))
+        # 尝试从video_stream中获取image_dir路径（用于DROID数据集）
+        image_dir = None
+        if hasattr(video_stream, 'path'):
+            image_dir = video_stream.path
+
+        init_processors.append(GeoCalibIntrinsicsProcessor(video_stream, camera_type=self.camera_type, image_dir=image_dir))
         if self.init_cfg.instance is not None:
             init_processors.append(
                 TrackAnythingProcessor(
@@ -151,12 +164,32 @@ class DefaultAnnotationPipeline(Pipeline):
 
         # Dumping artifacts for all views in the streams
         for output_stream, artifact_path in zip(output_streams, artifact_paths):
-            artifact_path.meta_info_path.parent.mkdir(exist_ok=True, parents=True)
-            if self.out_cfg.save_artifacts:
+            artifact_flags_enabled = any(
+                [
+                    self.save_pose,
+                    self.save_intrinsics,
+                    self.save_rgb,
+                    self.save_depth,
+                    self.save_mask,
+                    self.save_instance_phrases,
+                ]
+            )
+            if artifact_flags_enabled:
                 logger.info(f"Saving artifacts to {artifact_path}")
-                io.save_artifacts(artifact_path, output_stream)
-                with artifact_path.meta_info_path.open("wb") as f:
-                    pickle.dump({"ba_residual": slam_output.ba_residual}, f)
+                io.save_artifacts(
+                    artifact_path,
+                    output_stream,
+                    save_pose=self.save_pose,
+                    save_intrinsics=self.save_intrinsics,
+                    save_rgb=self.save_rgb,
+                    save_depth=self.save_depth,
+                    save_mask=self.save_mask,
+                    save_instance_phrases=self.save_instance_phrases,
+                )
+                if self.save_meta_info:
+                    artifact_path.meta_info_path.parent.mkdir(exist_ok=True, parents=True)
+                    with artifact_path.meta_info_path.open("wb") as f:
+                        pickle.dump({"ba_residual": slam_output.ba_residual}, f)
 
             if self.out_cfg.save_viz:
                 save_projection_video(

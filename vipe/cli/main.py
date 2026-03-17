@@ -47,7 +47,20 @@ from vipe.utils.viser import run_viser
     type=click.Path(exists=True, path_type=Path),
     help="Directory containing per-frame known depth files (*.npy or *.npz) for both SLAM init and mvd post depth.",
 )
-def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: bool, known_depth_dir: Path | None):
+@click.option(
+    "--save-artifacts/--no-save-artifacts",
+    default=False,
+    help="Save per-frame artifacts such as intrinsics, rgb, and flow (default: disabled)",
+)
+def infer(
+    video: Path,
+    image_dir: Path,
+    output: Path,
+    pipeline: str,
+    visualize: bool,
+    known_depth_dir: Path | None,
+    save_artifacts: bool,
+):
     """Run inference on a video file or directory of images."""
 
     logger = configure_logging()
@@ -61,7 +74,14 @@ def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: 
         click.echo("Error: Cannot provide both video file and --image-dir", err=True)
         raise click.Abort()
 
-    overrides = [f"pipeline={pipeline}", f"pipeline.output.path={output}", "pipeline.output.save_artifacts=true"]
+    overrides = [
+        f"pipeline={pipeline}",
+        f"pipeline.output.path={output}",
+        f"pipeline.output.save_artifacts={str(save_artifacts).lower()}",
+        f"pipeline.output.save_intrinsics={str(save_artifacts).lower()}",
+        f"pipeline.output.save_rgb={str(save_artifacts).lower()}",
+        f"pipeline.output.save_depth={str(save_artifacts).lower()}",
+    ]
     if visualize:
         overrides.append("pipeline.output.save_viz=true")
         overrides.append("pipeline.slam.visualize=true")

@@ -20,6 +20,9 @@ init:
       - pet
       - car
       - bus
+      - robot
+      - human
+      - machine
     add_sky: false
 
 slam:
@@ -40,6 +43,13 @@ output:
 
   # Save artifacts and a info file
   save_artifacts: false
+  save_pose: true
+  save_mask: true
+  save_instance_phrases: true
+  save_intrinsics: false
+  save_rgb: false
+  save_depth: false
+  save_meta_info: false
 
   # Save reconstruction from SLAM
   save_slam_map: false
