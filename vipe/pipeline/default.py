@@ -85,10 +85,9 @@ class DefaultAnnotationPipeline(Pipeline):
         assert FrameAttribute.METRIC_DEPTH not in video_stream.attributes()
         assert FrameAttribute.INSTANCE not in video_stream.attributes()
 
-        # 尝试从video_stream中获取image_dir路径（用于DROID数据集）
-        image_dir = None
-        if hasattr(video_stream, 'path'):
-            image_dir = video_stream.path
+        # 优先使用 CLI 显式传入的 --image-dir
+        image_dir_cfg = self.init_cfg.get("image_dir", None)
+        image_dir = Path(image_dir_cfg) if image_dir_cfg is not None else self._extract_stream_path(video_stream)
 
         init_processors.append(GeoCalibIntrinsicsProcessor(video_stream, camera_type=self.camera_type, image_dir=image_dir))
         if self.init_cfg.instance is not None:

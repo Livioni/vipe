@@ -95,7 +95,8 @@ def infer(
     if image_dir:
         overrides.extend([
             "streams=frame_dir_stream",
-            f"streams.base_path={image_dir}"
+            f"streams.base_path={image_dir}",
+            f"pipeline.init.image_dir={image_dir}",
         ])
         input_path = image_dir
         input_desc = f"image directory {image_dir}"

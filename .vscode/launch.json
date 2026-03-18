@@ -20,10 +20,10 @@
             "args": [
                 "infer",
                 "--image-dir",
-                "datasets/droid/Fri_Apr_21_17:11:41_2023/17368348/images/left",
+                "/mnt/local/lihao/phs/Depth-Anything-3/datasets/droid/Mon_Jun_19_16:56:39_2023/16787047/images/left",
                 "--pipeline", "dav3_slam_only",
                 "--output",
-                "vipe_results/droid/Fri_Apr_21_17:11:41_2023"
+                "/mnt/local/lihao/phs/Depth-Anything-3/datasets/droid/Mon_Jun_19_16:56:39_2023/16787047"
             ],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",

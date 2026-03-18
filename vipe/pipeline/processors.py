@@ -106,6 +106,7 @@ class IntrinsicEstimationProcessor(StreamProcessor):
         frame.intrinsics = torch.as_tensor(
             [200, 200, frame_width / 2, frame_height / 2] + self.distortion,
         ).float()
+        # logger.info(f"Estimated intrinsics: {frame.intrinsics}")
         frame.camera_type = self.camera_type
         return frame
 
